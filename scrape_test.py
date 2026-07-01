@@ -12,6 +12,7 @@
 import argparse
 import json
 import os
+import time
 import datetime
 import signal
 from playwright.sync_api import sync_playwright
@@ -21,6 +22,31 @@ RESULT_FILE = "result.json"
 
 CHART_SCROLL_TIMES = int(os.environ.get("CHART_SCROLL_TIMES", "5"))
 SINGLE_ITEM_TIMEOUT = int(os.environ.get("SINGLE_ITEM_TIMEOUT", "120"))
+
+
+def wait_for_api_response(page, all_api_data, url_pattern, before_count=None, timeout=10000, interval=200):
+    """轮询 all_api_data，等待匹配 url_pattern 的新 API 响应到达。
+
+    Args:
+        page: Playwright page 对象
+        all_api_data: handle_response 收集的响应字典
+        url_pattern: URL 匹配子串
+        before_count: 调用前的响应总数；None 表示等待任意匹配响应
+        timeout: 超时（毫秒）
+        interval: 轮询间隔（毫秒）
+    Returns:
+        True 如果检测到新响应，False 如果超时
+    """
+    start = time.time()
+    while time.time() - start < timeout / 1000:
+        current = sum(len(resps) for url, resps in all_api_data.items() if url_pattern in url)
+        if before_count is None:
+            if current > 0:
+                return True
+        elif current > before_count:
+            return True
+        page.wait_for_timeout(interval)
+    return False
 
 
 class TimeoutException(Exception):
@@ -75,7 +101,7 @@ def scrape_one(page, goods_id, item_name=None):
         # 1. 访问详情页
         print(f"  [1] 访问详情页...", flush=True)
         page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(5000)
+        wait_for_api_response(page, all_api_data, "info/good", before_count=0, timeout=10000)
 
         # 2. 提取基本信息
         print(f"  [2] 提取基本信息...", flush=True)
@@ -96,6 +122,7 @@ def scrape_one(page, goods_id, item_name=None):
 
         # 3. 点击 K 线图
         print(f"  [3] 点击 K 线图...", flush=True)
+        _before_chart = sum(len(resps) for url, resps in all_api_data.items() if "chartAll" in url)
         page.evaluate("""() => {
             const buttons = document.querySelectorAll('button');
             for (const btn of buttons) {
@@ -103,7 +130,7 @@ def scrape_one(page, goods_id, item_name=None):
             }
             return false;
         }""")
-        page.wait_for_timeout(2000)
+        wait_for_api_response(page, all_api_data, "chartAll", before_count=_before_chart, timeout=5000)
 
         # 4. 切换平台到悠悠有品
         print(f"  [4] 切换平台到悠悠有品...", flush=True)
@@ -118,6 +145,7 @@ def scrape_one(page, goods_id, item_name=None):
             return null;
         }""")
         if select_info:
+            _before_chart = sum(len(resps) for url, resps in all_api_data.items() if "chartAll" in url)
             page.evaluate("""(targetValue) => {
                 const selects = document.querySelectorAll('select');
                 for (const sel of selects) {
@@ -130,13 +158,14 @@ def scrape_one(page, goods_id, item_name=None):
                 }
                 return false;
             }""", select_info["value"])
-            page.wait_for_timeout(2000)
+            wait_for_api_response(page, all_api_data, "chartAll", before_count=_before_chart, timeout=5000)
             print(f"      ✓ 切换完成", flush=True)
 
         # 5. 切换日线 + 翻页
         print(f"  [5] 切换日线并翻页...", flush=True)
         chart_url = "https://csqaq.com/proxies/api/v1/info/simple/chartAll"
 
+        _before_chart = sum(len(resps) for url, resps in all_api_data.items() if "chartAll" in url)
         page.evaluate("""() => {
             const els = document.querySelectorAll('span, div, a, button');
             for (const el of els) {
@@ -144,7 +173,7 @@ def scrape_one(page, goods_id, item_name=None):
             }
             return false;
         }""")
-        page.wait_for_timeout(3000)
+        wait_for_api_response(page, all_api_data, "chartAll", before_count=_before_chart, timeout=5000)
 
         if chart_url in all_api_data and all_api_data[chart_url]:
             parsed = json.loads(all_api_data[chart_url][-1]["body"])
@@ -208,6 +237,7 @@ def scrape_one(page, goods_id, item_name=None):
 
         # 6. 切换 1 小时
         print(f"  [6] 切换 1 小时...", flush=True)
+        _before_chart = sum(len(resps) for url, resps in all_api_data.items() if "chartAll" in url)
         page.evaluate("""() => {
             const targets = ['1小时', '1H', '1h'];
             const els = document.querySelectorAll('span, div, a, button, li');
@@ -218,7 +248,7 @@ def scrape_one(page, goods_id, item_name=None):
             }
             return false;
         }""")
-        page.wait_for_timeout(3000)
+        wait_for_api_response(page, all_api_data, "chartAll", before_count=_before_chart, timeout=5000)
 
         if chart_url in all_api_data and all_api_data[chart_url]:
             latest_idx = len(all_api_data[chart_url]) - 1
@@ -235,6 +265,7 @@ def scrape_one(page, goods_id, item_name=None):
         print(f"  [7] 点击筹码分布图...", flush=True)
         chip_url = "https://csqaq.com/proxies/api/v1/info/chipData"
 
+        _before_chip = sum(len(resps) for url, resps in all_api_data.items() if "chipData" in url)
         page.evaluate("""() => {
             const chipEl = document.querySelector('.chip_tag___2aXfK');
             if (chipEl) { chipEl.click(); return 'class'; }
@@ -247,9 +278,10 @@ def scrape_one(page, goods_id, item_name=None):
             }
             return false;
         }""")
-        page.wait_for_timeout(6000)
+        wait_for_api_response(page, all_api_data, "chipData", before_count=_before_chip, timeout=10000)
 
         if chip_url not in all_api_data:
+            _before_chip = sum(len(resps) for url, resps in all_api_data.items() if "chipData" in url)
             page.evaluate("""() => {
                 const els = document.querySelectorAll('*');
                 for (const el of els) {
@@ -260,7 +292,7 @@ def scrape_one(page, goods_id, item_name=None):
                 }
                 return false;
             }""")
-            page.wait_for_timeout(6000)
+            wait_for_api_response(page, all_api_data, "chipData", before_count=_before_chip, timeout=10000)
 
         if chip_url in all_api_data and all_api_data[chip_url]:
             last_resp = all_api_data[chip_url][-1]
